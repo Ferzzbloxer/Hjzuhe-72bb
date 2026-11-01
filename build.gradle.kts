@@ -12,7 +12,8 @@ buildscript {
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
         classpath("com.github.recloudstream:gradle:-SNAPSHOT")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
+        // Bumped to 2.3.0 to match the upstream library's Kotlin toolchain
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
     }
 }
 
@@ -40,7 +41,6 @@ subprojects {
     }
 
     android {
-        // AGP 8+ requires a namespace for each library module
         namespace = "com.redecanais.${project.name.lowercase()}"
 
         compileSdkVersion(35)
@@ -58,7 +58,9 @@ subprojects {
                 freeCompilerArgs.addAll(
                     "-Xno-call-assertions",
                     "-Xno-param-assertions",
-                    "-Xno-receiver-assertions"
+                    "-Xno-receiver-assertions",
+                    // Bypasses the Kotlin metadata version checker and avoids the FIR compiler crash
+                    "-Xskip-metadata-version-check"
                 )
             }
         }
@@ -66,7 +68,6 @@ subprojects {
 
     dependencies {
         val implementation by configurations
-        // Official library artifact used by modern CloudStream plugin
         implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.11")
