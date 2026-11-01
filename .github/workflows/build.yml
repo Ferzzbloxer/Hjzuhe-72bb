@@ -1,0 +1,39 @@
+name: build
+
+on:
+  push:
+    branches: [ master ]
+    paths-ignore: [ '**.md', 'icon.png' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      - run: chmod +x gradlew
+
+      - name: Build
+        run: ./gradlew make makePluginsJson --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: builds
+          path: build/builds/
+
+      - name: Publish to builds branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: builds
+          publish_dir: ./build/builds
+          force_orphan: true
