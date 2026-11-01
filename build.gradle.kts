@@ -1,17 +1,27 @@
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import com.android.build.gradle.BaseExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 buildscript {
-    repositories { google(); mavenCentral(); maven("https://jitpack.io") }
+    repositories {
+        google()
+        mavenCentral()
+        maven("https://jitpack.io")
+    }
     dependencies {
-        classpath("com.android.tools.build:gradle:7.4.2")
+        classpath("com.android.tools.build:gradle:8.7.3")
         classpath("com.github.recloudstream:gradle:-SNAPSHOT")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
     }
 }
 
 allprojects {
-    repositories { google(); mavenCentral(); maven("https://jitpack.io") }
+    repositories {
+        google()
+        mavenCentral()
+        maven("https://jitpack.io")
+    }
 }
 
 fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
@@ -26,33 +36,44 @@ subprojects {
     apply(plugin = "com.lagradost.cloudstream3.gradle")
 
     cloudstream {
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/SEU_USUARIO/redecanais-cloudstream")
+        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/Ferzzbloxer/Hjzuhe-72bb")
     }
 
     android {
-        compileSdkVersion(34)
-        defaultConfig { minSdk = 21; targetSdk = 34 }
+        // AGP 8+ requires a namespace for each library module
+        namespace = "com.redecanais.${project.name.lowercase()}"
+
+        compileSdkVersion(35)
+        defaultConfig {
+            minSdk = 21
+            targetSdk = 35
+        }
         compileOptions {
             sourceCompatibility = JavaVersion.VERSION_1_8
             targetCompatibility = JavaVersion.VERSION_1_8
         }
-        tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-            kotlinOptions {
-                jvmTarget = "1.8"
-                freeCompilerArgs = freeCompilerArgs +
-                    "-Xno-call-assertions" + "-Xno-param-assertions" + "-Xno-receiver-assertions"
+        tasks.withType<KotlinJvmCompile> {
+            compilerOptions {
+                jvmTarget.set(JvmTarget.JVM_1_8)
+                freeCompilerArgs.addAll(
+                    "-Xno-call-assertions",
+                    "-Xno-param-assertions",
+                    "-Xno-receiver-assertions"
+                )
             }
         }
     }
 
     dependencies {
-        val apk by configurations
         val implementation by configurations
-        apk("com.lagradost:cloudstream3:pre-release")
+        // Official library artifact used by modern CloudStream plugin
+        implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
         implementation(kotlin("stdlib"))
-        implementation("com.github.Blatzar:NiceHttp:0.3.2")
-        implementation("org.jsoup:jsoup:1.17.2")
+        implementation("com.github.Blatzar:NiceHttp:0.4.11")
+        implementation("org.jsoup:jsoup:1.18.3")
     }
 }
 
-tasks.register<Delete>("clean") { delete(rootProject.layout.buildDirectory) }
+tasks.register<Delete>("clean") {
+    delete(rootProject.layout.buildDirectory)
+}
