@@ -10,7 +10,6 @@ class RedeCanaisPlugin : Plugin() {
     override fun load(context: Context) {
         Cfg.init(context)
         registerMainAPI(RedeCanais())
-        registerLiveAPI(com.redecanais.tv.RedeCanaisTV())
 
         registerSettings(
             buildSettings {

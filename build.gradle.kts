@@ -12,7 +12,6 @@ buildscript {
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
         classpath("com.github.recloudstream:gradle:-SNAPSHOT")
-        // Bumped to 2.3.0 to match the upstream library's Kotlin toolchain
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
     }
 }
@@ -59,7 +58,6 @@ subprojects {
                     "-Xno-call-assertions",
                     "-Xno-param-assertions",
                     "-Xno-receiver-assertions",
-                    // Bypasses the Kotlin metadata version checker and avoids the FIR compiler crash
                     "-Xskip-metadata-version-check"
                 )
             }
@@ -67,9 +65,11 @@ subprojects {
     }
 
     dependencies {
+        val cloudstream by configurations
         val implementation by configurations
-        implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
+        cloudstream("com.lagradost:cloudstream3:pre-release")
         implementation(kotlin("stdlib"))
+        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
         implementation("com.github.Blatzar:NiceHttp:0.4.11")
         implementation("org.jsoup:jsoup:1.18.3")
     }

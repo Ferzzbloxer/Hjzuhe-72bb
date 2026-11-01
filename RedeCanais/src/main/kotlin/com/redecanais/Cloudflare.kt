@@ -5,7 +5,7 @@ import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.NiceResponse
+import com.lagradost.nicehttp.NiceResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
