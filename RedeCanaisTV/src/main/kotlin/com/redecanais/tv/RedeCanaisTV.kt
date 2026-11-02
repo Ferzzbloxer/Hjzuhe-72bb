@@ -57,7 +57,7 @@ class RedeCanaisTV : MainAPI() {
         val pageUrl = fixUrl(data)
         val doc = app.get(pageUrl, referer = "$mainUrl/").document
 
-        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORECASE)
+        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             .find(doc.html())?.groupValues?.get(1) ?: return false
 
         return loadExtractor(fixUrl(iframe), pageUrl, subtitleCallback, callback)

@@ -236,7 +236,7 @@ class RedeCanais : MainAPI() {
     private suspend fun unwrapEmbed(embedUrl: String, referer: String): String? {
         if (Regex("""\.(m3u8|mp4)(\?|$)""").containsMatchIn(embedUrl)) return embedUrl
         val html = runCatching { Cf.get(embedUrl, referer = referer).text }.getOrNull() ?: return embedUrl
-        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORECASE)
+        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             .find(html)?.groupValues?.get(1)
         val source = Regex("""(?:file|src)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""")
             .find(html)?.groupValues?.get(1)
