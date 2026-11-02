@@ -26,7 +26,8 @@ class RedeCanais : MainAPI() {
 
     private var warned = false
 
-    override val mainPage: List<MainPageRequest>
+    // Fix 1: Type must be List<MainPageData>
+    override val mainPage: List<MainPageData>
         get() {
             val b = mainUrl.ifBlank { return emptyList() }
             return mainPageOf(
@@ -180,7 +181,8 @@ class RedeCanais : MainAPI() {
             .select("#playeroptions li[data-post]")
         if (options.isEmpty()) return false
 
-        options.apmap { opt ->
+        // Fix 2: Use amap and standard non-suspending ExtractorLink mapping
+        options.amap { opt ->
             val label = opt.selectFirst("span.title")?.text()?.trim()
                 ?.replace(Regex("""[▶️\s]+"""), " ")?.trim().orEmpty()
             val embed = getEmbedUrl(
@@ -188,22 +190,22 @@ class RedeCanais : MainAPI() {
                 opt.attr("data-nume"),
                 opt.attr("data-type").ifBlank { "movie" },
                 base
-            ) ?: return@apmap
+            ) ?: return@amap
 
-            val target = unwrapEmbed(embed, pageUrl) ?: return@apmap
+            val target = unwrapEmbed(embed, pageUrl) ?: return@amap
 
             loadExtractor(target, pageUrl, subtitleCallback) { link ->
+                val quality = getQualityFromName(label)
                 callback.invoke(
-                    newExtractorLink(
+                    ExtractorLink(
                         source = this.name,
                         name = "[${label.ifBlank { "Servidor" }}] ${link.name}",
                         url = link.url,
-                        type = link.type
-                    ) {
-                        this.referer = pageUrl
-                        this.quality = getQualityFromName(label)
-                        this.headers = link.headers
-                    }
+                        referer = pageUrl,
+                        quality = quality,
+                        type = link.type,
+                        headers = link.headers
+                    )
                 )
             }
         }
