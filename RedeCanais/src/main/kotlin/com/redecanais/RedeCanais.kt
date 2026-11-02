@@ -159,6 +159,8 @@ class RedeCanais : MainAPI() {
         }
     }
 
+    /* ------------------------- players ------------------------- */
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -167,38 +169,112 @@ class RedeCanais : MainAPI() {
     ): Boolean {
         val base = requireDomain() ?: return false
         val pageUrl = fixUrl(data)
-        val options = Cf.get(pageUrl, referer = "$base/").document
-            .select("#playeroptions li[data-post]")
-        if (options.isEmpty()) return false
+        val doc = Cf.get(pageUrl, referer = "$base/").document
 
-        options.amap { opt ->
-            val label = opt.selectFirst("span.title")?.text()?.trim()
-                ?.replace(Regex("""[▶️\s]+"""), " ")?.trim().orEmpty()
-            val embed = getEmbedUrl(
-                opt.attr("data-post"),
-                opt.attr("data-nume"),
-                opt.attr("data-type").ifBlank { "movie" },
-                base
-            ) ?: return@amap
+        var foundLinks = false
 
-            val target = unwrapEmbed(embed, pageUrl) ?: return@amap
+        // 1. Try DooPlay options if present
+        val options = doc.select("#playeroptions li[data-post], ul.playeroptions li")
+        if (options.isNotEmpty()) {
+            options.amap { opt ->
+                val label = opt.selectFirst("span.title, .title")?.text()?.trim()
+                    ?.replace(Regex("""[▶️\s]+"""), " ")?.trim().orEmpty()
+                val post = opt.attr("data-post").ifBlank { opt.attr("data-id") }
+                val nume = opt.attr("data-nume")
+                val type = opt.attr("data-type").ifBlank { if (pageUrl.contains("/filme/")) "movie" else "tv" }
 
-            loadExtractor(target, pageUrl, subtitleCallback) { link ->
-                val quality = getQualityFromName(label)
-                callback.invoke(
-                    ExtractorLink(
-                        source = this.name,
-                        name = "[${label.ifBlank { "Servidor" }}] ${link.name}",
-                        url = link.url,
-                        referer = pageUrl,
-                        quality = quality,
-                        type = link.type,
-                        headers = link.headers
-                    )
-                )
+                val embed = if (post.isNotBlank() && nume.isNotBlank()) {
+                    getEmbedUrl(post, nume, type, base)
+                } else null
+
+                val target = embed?.let { unwrapEmbed(it, pageUrl) }
+                if (target != null) {
+                    loadExtractor(target, pageUrl, subtitleCallback) { link ->
+                        foundLinks = true
+                        callback.invoke(
+                            ExtractorLink(
+                                source = this.name,
+                                name = "[${label.ifBlank { "Player" }}] ${link.name}",
+                                url = link.url,
+                                referer = pageUrl,
+                                quality = getQualityFromName(label),
+                                type = link.type,
+                                headers = link.headers
+                            )
+                        )
+                    }
+                }
             }
         }
-        return true
+
+        // 2. Fallback for Movies: Look for direct iframes on the page
+        if (!foundLinks) {
+            val iframes = doc.select("iframe[src], div.playbox iframe, #playerep iframe")
+                .mapNotNull { it.attr("src").takeIf { src -> src.isNotBlank() } }
+                .filterNot { it.contains("facebook") || it.contains("twitter") || it.contains("disqus") }
+
+            iframes.amap { rawIframe ->
+                val target = unwrapEmbed(fixUrl(rawIframe), pageUrl) ?: fixUrl(rawIframe)
+                loadExtractor(target, pageUrl, subtitleCallback) { link ->
+                    foundLinks = true
+                    callback.invoke(
+                        ExtractorLink(
+                            source = this.name,
+                            name = "[Filme] ${link.name}",
+                            url = link.url,
+                            referer = pageUrl,
+                            quality = link.quality,
+                            type = link.type,
+                            headers = link.headers
+                        )
+                    )
+                }
+            }
+        }
+
+        return foundLinks
+    }
+
+    private suspend fun getEmbedUrl(post: String, nume: String, type: String, base: String): String? {
+        val raw = runCatching {
+            Cf.post(
+                "$base/wp-admin/admin-ajax.php",
+                data = mapOf("action" to "doo_player_ajax", "post" to post, "nume" to nume, "type" to type),
+                referer = "$base/"
+            ).text
+        }.getOrNull().orEmpty()
+
+        parseEmbed(raw)?.let { return it }
+
+        val rest = runCatching {
+            Cf.post(
+                "$base/wp-json/dooplayer/v1/player",
+                data = mapOf("id" to post, "nume" to nume, "type" to type),
+                referer = "$base/"
+            ).text
+        }.getOrNull().orEmpty()
+
+        return parseEmbed(rest)
+    }
+
+    private fun parseEmbed(raw: String): String? {
+        if (raw.isBlank()) return null
+        val json = raw.replace("\\/", "/")
+        val url = runCatching { JSONObject(json).optString("embed_url") }.getOrNull()
+            ?.takeIf { it.startsWith("http") }
+            ?: Regex("""embed_url"\s*:\s*"([^"]+)"""").find(json)
+                ?.groupValues?.get(1)?.replace("\\/", "/")
+        return url?.takeIf { it.startsWith("http") }
+    }
+
+    private suspend fun unwrapEmbed(embedUrl: String, referer: String): String? {
+        if (Regex("""\.(m3u8|mp4)(\?|$)""").containsMatchIn(embedUrl)) return embedUrl
+        val html = runCatching { Cf.get(embedUrl, referer = referer).text }.getOrNull() ?: return embedUrl
+        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1)
+        val source = Regex("""(?:file|src)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""")
+            .find(html)?.groupValues?.get(1)
+        return (source ?: iframe)?.let { fixUrl(it) } ?: embedUrl
     }
 
     private suspend fun getEmbedUrl(post: String, nume: String, type: String, base: String): String? {
