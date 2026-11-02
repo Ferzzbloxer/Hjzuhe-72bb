@@ -3,6 +3,6 @@
   "description": "Repositório RedeCanais para CloudStream",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/Ferzzbloxer/Hjzuhe-72bb/builds/plugins.json"
+    "https://raw.githubusercontent.com/Ferzzbloxer/Hjzuhe-72bb/refs/heads/main/builds/plugins.json"
   ]
 }
