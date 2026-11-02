@@ -5,10 +5,8 @@ import android.os.Looper
 import android.widget.Toast
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.json.JSONObject
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
-import java.util.Calendar
 
 class RedeCanais : MainAPI() {
 
@@ -22,7 +20,7 @@ class RedeCanais : MainAPI() {
     override val hasQuickSearch = true
     override var lang = "pt"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.OVA)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
     private var warned = false
 
@@ -30,11 +28,10 @@ class RedeCanais : MainAPI() {
         get() {
             val b = mainUrl.ifBlank { return emptyList() }
             return mainPageOf(
-                "$b/filme/" to "Filmes",
-                "$b/serie/" to "Séries",
-                "$b/serie/?filter=animes" to "Animes",
-                "$b/serie/?filter=novelas" to "Novelas",
-                "$b/ano/${Calendar.getInstance().get(Calendar.YEAR)}/" to "Lançamentos"
+                "$b/browse-filmes-videos-1-date.html" to "Filmes Recentes",
+                "$b/browse-series-videos-1-date.html" to "Séries Recentes",
+                "$b/browse-animes-videos-1-date.html" to "Animes",
+                "$b/browse-desenhos-videos-1-date.html" to "Desenhos"
             )
         }
 
@@ -51,7 +48,7 @@ class RedeCanais : MainAPI() {
         if (Cfg.isConfigured) return mainUrl
         if (!warned) {
             warned = true
-            toast("Informe o endereço do RedeCanais: digite a URL no campo de busca (ex.: https://redecanais.by)")
+            toast("Informe o endereço do RedeCanais no campo de busca (ex.: https://redecanais.by)")
         }
         return null
     }
@@ -84,14 +81,22 @@ class RedeCanais : MainAPI() {
     /* ------------------------- parsing ------------------------- */
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val href = selectFirst("a[href]")?.attr("href") ?: return null
-        if (!href.contains("/filme/") && !href.contains("/serie/")) return null
-        val title = selectFirst("h3, h4, .title")?.text()?.trim()
-            ?: selectFirst("img")?.attr("alt")?.trim() ?: return null
-        val type = if (href.contains("/filme/")) TvType.Movie else TvType.TvSeries
+        val aTag = selectFirst("a[href]") ?: return null
+        val href = aTag.attr("href")
+        if (!href.contains(".html") && !href.contains("_")) return null
+
+        val img = selectFirst("img")
+        val title = img?.attr("alt")?.trim()
+            ?: selectFirst(".pm-video-title, h3, h4, .title")?.text()?.trim()
+            ?: return null
+
+        val poster = img?.let { it.attr("data-echo").ifBlank { it.attr("data-src").ifBlank { it.attr("src") } } }
+        val isSeries = title.contains("temporada", true) || href.contains("serie", true)
+        val type = if (isSeries) TvType.TvSeries else TvType.Movie
+
         return newMovieSearchResponse(title, fixUrl(href), type) {
-            posterUrl = selectFirst("img")?.let { it.attr("data-src").ifBlank { it.attr("src") } }
-            year = Regex("""(\d{4})""").find(text())?.groupValues?.get(1)?.toIntOrNull()
+            this.posterUrl = poster
+            this.year = Regex("""(\d{4})""").find(title)?.groupValues?.get(1)?.toIntOrNull()
         }
     }
 
@@ -99,73 +104,68 @@ class RedeCanais : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val base = requireDomain() ?: return newHomePageResponse(request, emptyList())
-        val url = if (page == 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
+        val url = if (page == 1) request.data else request.data.replace("-1-", "-$page-")
         val doc = Cf.get(url, referer = "$base/").document
-        return newHomePageResponse(
-            request,
-            doc.select("div.items article.item, div.items div.item").mapNotNull { it.toSearchResult() }
-        )
+        val items = doc.select("li.pm-video-item, div.pm-video-thumb, div.video-thumb, li[class*='pm-li-video']")
+            .mapNotNull { it.toSearchResult() }
+        return newHomePageResponse(request, items)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (maybeSaveDomain(query)) return emptyList()
         val base = requireDomain() ?: return emptyList()
-        val doc = Cf.get("$base/search/${URLEncoder.encode(query, "UTF-8")}/", referer = "$base/").document
-        return doc.select("div.items article.item, div.items div.item").mapNotNull { it.toSearchResult() }
+        val searchUrl = "$base/search.php?keywords=${URLEncoder.encode(query, "UTF-8")}&video-id="
+        val doc = Cf.get(searchUrl, referer = "$base/").document
+        return doc.select("li.pm-video-item, div.pm-video-thumb, div.video-thumb, li[class*='pm-li-video']")
+            .mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val base = requireDomain() ?: return null
-        val doc = Cf.get(fixUrl(url), referer = "$base/").document
+        val pageUrl = fixUrl(url)
+        val doc = Cf.get(pageUrl, referer = "$base/").document
 
-        val title = doc.selectFirst("div.sheader h1")?.text()
-            ?.substringBefore(" - RedeCanais")?.trim() ?: return null
-        val poster = doc.selectFirst("div.sheader div.poster img")?.attr("src")
-        val plot = doc.selectFirst("#info .wp-content")?.text()?.trim()
-        val year = Regex("""\d{4}""")
-            .find(doc.selectFirst("div.sheader span.date")?.text().orEmpty())?.value?.toIntOrNull()
-        val tags = doc.select("div.sgeneros a").map { it.text().trim() }
+        val title = doc.selectFirst("h1, .pm-video-heading h1")?.text()?.trim()
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
+            ?: return null
 
-        if (url.contains("/filme/")) {
-            return newMovieLoadResponse(title, fixUrl(url), TvType.Movie, fixUrl(url)) {
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: doc.selectFirst("#video-wrapper img, .pm-video-thumb img")?.attr("src")
+
+        val plot = doc.selectFirst("#pm-details, .pm-video-description, #info")?.text()?.trim()
+        val year = Regex("""\d{4}""").find(title)?.value?.toIntOrNull()
+
+        // Check if page contains multiple episode links (Series) or is a single Movie
+        val epLinks = doc.select("a[href*='_'][href$='.html']").filter { el ->
+            val text = el.text()
+            text.contains("Episódio", true) || text.contains("Ep.", true) || text.contains("Temp", true)
+        }
+
+        if (epLinks.isNotEmpty()) {
+            val episodes = epLinks.mapIndexed { idx, el ->
+                val epTitle = el.text().trim()
+                val epNum = Regex("""(?i)(?:epis[oó]dio|ep\.?)\s*(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull() ?: (idx + 1)
+                newEpisode(fixUrl(el.attr("href"))) {
+                    this.name = epTitle
+                    this.episode = epNum
+                }
+            }
+            return newTvSeriesLoadResponse(title, pageUrl, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.year = year
-                this.tags = tags
             }
         }
 
-        val episodes = mutableListOf<Episode>()
-        doc.select("#seasons .se-c").forEach { season ->
-            val seasonNum = season.selectFirst("span.se-t")?.text()?.trim()?.toIntOrNull() ?: 1
-            season.select("ul.episodios li a[href]").forEach { a ->
-                val epUrl = fixUrl(a.attr("href"))
-                val epNum = Regex("""(\d+)\s*x\s*(\d+)""")
-                    .find(a.selectFirst(".numerando")?.text().orEmpty())
-                    ?.groupValues?.get(2)?.toIntOrNull()
-                    ?: Regex("""(\d+)x(\d+)""").find(epUrl)?.groupValues?.get(2)?.toIntOrNull()
-                episodes += newEpisode(epUrl) {
-                    this.name = a.selectFirst(".episode-title")?.text()?.trim() ?: "T$seasonNum E$epNum"
-                    this.season = seasonNum
-                    this.episode = epNum
-                    this.posterUrl = a.selectFirst("img")?.attr("src")
-                }
-            }
-        }
-
-        if (episodes.isEmpty() && doc.selectFirst("#playeroptions li[data-post]") != null) {
-            episodes += newEpisode(fixUrl(url)) { this.name = "Assistir" }
-        }
-
-        return newTvSeriesLoadResponse(title, fixUrl(url), TvType.TvSeries, episodes) {
+        // Movie
+        return newMovieLoadResponse(title, pageUrl, TvType.Movie, pageUrl) {
             this.posterUrl = poster
             this.plot = plot
             this.year = year
-            this.tags = tags
         }
     }
 
-    /* ------------------------- players ------------------------- */
+    /* ------------------------- players & extraction ------------------------- */
 
     override suspend fun loadLinks(
         data: String,
@@ -177,109 +177,75 @@ class RedeCanais : MainAPI() {
         val pageUrl = fixUrl(data)
         val doc = Cf.get(pageUrl, referer = "$base/").document
 
-        var foundLinks = false
+        var found = false
 
-        // 1. Try DooPlay options if present
-        val options = doc.select("#playeroptions li[data-post], ul.playeroptions li")
-        if (options.isNotEmpty()) {
-            options.amap { opt ->
-                val label = opt.selectFirst("span.title, .title")?.text()?.trim()
-                    ?.replace(Regex("""[▶️\s]+"""), " ")?.trim().orEmpty()
-                val post = opt.attr("data-post").ifBlank { opt.attr("data-id") }
-                val nume = opt.attr("data-nume")
-                val type = opt.attr("data-type").ifBlank { if (pageUrl.contains("/filme/")) "movie" else "tv" }
+        // 1. Locate player iframe in page
+        val iframes = doc.select("#video-wrapper iframe, iframe[name='player_iframe'], iframe[src*='player'], iframe[src*='server'], iframe[src]")
+            .mapNotNull { it.attr("src").takeIf { src -> src.isNotBlank() } }
+            .filterNot { it.contains("facebook") || it.contains("twitter") || it.contains("disqus") }
 
-                val embed = if (post.isNotBlank() && nume.isNotBlank()) {
-                    getEmbedUrl(post, nume, type, base)
-                } else null
+        iframes.forEach { rawIframe ->
+            val iframeUrl = fixUrl(rawIframe)
 
-                val target = embed?.let { unwrapEmbed(it, pageUrl) }
-                if (target != null) {
-                    loadExtractor(target, pageUrl, subtitleCallback) { link ->
-                        foundLinks = true
-                        callback.invoke(
-                            ExtractorLink(
-                                source = this.name,
-                                name = "[${label.ifBlank { "Player" }}] ${link.name}",
-                                url = link.url,
-                                referer = pageUrl,
-                                quality = getQualityFromName(label),
-                                type = link.type,
-                                headers = link.headers
-                            )
-                        )
-                    }
+            // Direct video link inside iframe URL
+            if (iframeUrl.contains(".mp4") || iframeUrl.contains(".m3u8")) {
+                emitLink(iframeUrl, pageUrl, callback)
+                found = true
+                return@forEach
+            }
+
+            // Fetch iframe page to extract actual video stream
+            val playerDoc = runCatching { Cf.get(iframeUrl, referer = pageUrl) }.getOrNull()
+            if (playerDoc != null) {
+                val html = playerDoc.text
+
+                // Try <video> and <source> tags
+                val videoSources = playerDoc.document.select("video source[src], #instructions source[src], video[src], source[src]")
+                    .mapNotNull { it.attr("src").takeIf { s -> s.isNotBlank() } }
+
+                videoSources.forEach { vSrc ->
+                    val streamUrl = fixUrl(vSrc)
+                    emitLink(streamUrl, iframeUrl, callback)
+                    found = true
+                }
+
+                // Regex search for direct streams inside scripts (mp4/m3u8)
+                val scriptMatches = Regex("""(?:file|src)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
+                    .findAll(html)
+                    .map { it.groupValues[1] }
+                    .toList()
+
+                scriptMatches.forEach { sUrl ->
+                    emitLink(fixUrl(sUrl), iframeUrl, callback)
+                    found = true
+                }
+
+                // Nested iframe within player page
+                val nestedIframe = playerDoc.document.selectFirst("iframe[src]")?.attr("src")
+                if (!nestedIframe.isNullOrBlank()) {
+                    loadExtractor(fixUrl(nestedIframe), iframeUrl, subtitleCallback, callback)
+                    found = true
                 }
             }
+
+            // Fallback to standard CloudStream extractors
+            loadExtractor(iframeUrl, pageUrl, subtitleCallback, callback)
         }
 
-        // 2. Fallback for Movies: Look for direct iframes on the page
-        if (!foundLinks) {
-            val iframes = doc.select("iframe[src], div.playbox iframe, #playerep iframe")
-                .mapNotNull { it.attr("src").takeIf { src -> src.isNotBlank() } }
-                .filterNot { it.contains("facebook") || it.contains("twitter") || it.contains("disqus") }
-
-            iframes.amap { rawIframe ->
-                val target = unwrapEmbed(fixUrl(rawIframe), pageUrl) ?: fixUrl(rawIframe)
-                loadExtractor(target, pageUrl, subtitleCallback) { link ->
-                    foundLinks = true
-                    callback.invoke(
-                        ExtractorLink(
-                            source = this.name,
-                            name = "[Filme] ${link.name}",
-                            url = link.url,
-                            referer = pageUrl,
-                            quality = link.quality,
-                            type = link.type,
-                            headers = link.headers
-                        )
-                    )
-                }
-            }
-        }
-
-        return foundLinks
+        return found
     }
 
-    private suspend fun getEmbedUrl(post: String, nume: String, type: String, base: String): String? {
-        val raw = runCatching {
-            Cf.post(
-                "$base/wp-admin/admin-ajax.php",
-                data = mapOf("action" to "doo_player_ajax", "post" to post, "nume" to nume, "type" to type),
-                referer = "$base/"
-            ).text
-        }.getOrNull().orEmpty()
-
-        parseEmbed(raw)?.let { return it }
-
-        val rest = runCatching {
-            Cf.post(
-                "$base/wp-json/dooplayer/v1/player",
-                data = mapOf("id" to post, "nume" to nume, "type" to type),
-                referer = "$base/"
-            ).text
-        }.getOrNull().orEmpty()
-
-        return parseEmbed(rest)
-    }
-
-    private fun parseEmbed(raw: String): String? {
-        if (raw.isBlank()) return null
-        val json = raw.replace("\\/", "/")
-        val url = runCatching { JSONObject(json).optString("embed_url") }.getOrNull()
-            ?.takeIf { it.startsWith("http") }
-            ?: Regex("""embed_url"\s*:\s*"([^"]+)"""").find(json)
-                ?.groupValues?.get(1)?.replace("\\/", "/")
-        return url?.takeIf { it.startsWith("http") }
-    }
-
-    private suspend fun unwrapEmbed(embedUrl: String, referer: String): String? {
-        if (Regex("""\.(m3u8|mp4)(\?|$)""").containsMatchIn(embedUrl)) return embedUrl
-        val html = runCatching { Cf.get(embedUrl, referer = referer).text }.getOrNull() ?: return embedUrl
-        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-            .find(html)?.groupValues?.get(1)
-        val source = Regex("""(?:file|src)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""")
-            .find(html)?.groupValues?.get(1)
-        return (source ?: iframe)?.let { fixUrl(it) } ?: embedUrl
+    private fun emitLink(streamUrl: String, referer: String, callback: (ExtractorLink) -> Unit) {
+        val isM3u8 = streamUrl.contains(".m3u8", true)
+        callback.invoke(
+            ExtractorLink(
+                source = this.name,
+                name = "RedeCanais",
+                url = streamUrl,
+                referer = referer,
+                quality = Qualities.P1080.value,
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            )
+        )
     }
 }
