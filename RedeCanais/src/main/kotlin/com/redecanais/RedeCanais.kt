@@ -5,10 +5,23 @@ import android.os.Looper
 import android.widget.Toast
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.nicehttp.NiceResponse
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.math.BigInteger
 import java.net.URLDecoder
 import java.net.URLEncoder
 
+/**
+ * RedeCanais (tema toroplay/WordPress).
+ *
+ * Fluxo real do site:
+ *   /filme/<slug>/  |  /serie/<slug>/  |  /episodio/<slug>-temporadaN-episodioNN/
+ *     -> ul.TPlayerNv > li[data-tplayernv]  (rótulo = DUBLADO / LEGENDADO)
+ *     -> div.TPlayerTb#OptN > div[data-src] = /?trembed=0&trid=<postId>&trtype=1
+ *     -> esse embed devolve iframe -> /player/film.php?id=<id ofuscado>  (player Drive)
+ *     -> ou, em servidores alternativos, /_RC_/proxy?src=<url> | <video>/<source> | .mp4/.m3u8
+ */
 class RedeCanais : MainAPI() {
 
     override var name = "RedeCanais"
@@ -21,7 +34,8 @@ class RedeCanais : MainAPI() {
     override val hasQuickSearch = true
     override var lang = "pt"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
+    override val supportedTypes =
+        setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Cartoon)
 
     private var warned = false
 
@@ -29,14 +43,15 @@ class RedeCanais : MainAPI() {
         get() {
             val b = mainUrl.ifBlank { return emptyList() }
             return mainPageOf(
-                "$b/browse-filmes-videos-1-date.html" to "Filmes Recentes",
-                "$b/browse-series-videos-1-date.html" to "Séries Recentes",
-                "$b/browse-animes-videos-1-date.html" to "Animes",
-                "$b/browse-desenhos-videos-1-date.html" to "Desenhos"
+                "$b/filmes/" to "Filmes",
+                "$b/series/" to "Séries",
+                "$b/episodios/" to "Últimos Episódios",
+                "$b/mais-visitados/" to "Mais Visitados",
+                "$b/melhores-avaliacoes/" to "Melhores Avaliações"
             )
         }
 
-    /* ------------------------- configuração ------------------------- */
+    /* ------------------------- domínio / avisos ------------------------- */
 
     private fun toast(msg: String) {
         val ctx = Cfg.ctx ?: return
@@ -61,7 +76,7 @@ class RedeCanais : MainAPI() {
         if (!looksUrl || candidate.isBlank()) return false
 
         return try {
-            val res = Cf.get("$candidate/")
+            val res = fetch("$candidate/")
             val body = res.text.take(20_000)
             if (res.code in 200..399 && body.contains("redecanais", true)) {
                 Cfg.domain = candidate
@@ -79,94 +94,126 @@ class RedeCanais : MainAPI() {
         }
     }
 
-    /* ------------------------- parsing ------------------------- */
+    /* ------------------------- rede + cloudflare ------------------------- */
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val aTag = selectFirst("a[href]") ?: return null
-        val href = aTag.attr("href")
-        if (!href.contains(".html") && !href.contains("_")) return null
+    /**
+     * Utiliza o helper Cf (WebView) do projeto para resolver Turnstile / Cloudflare clearance
+     */
+    private suspend fun fetch(url: String, referer: String? = null): NiceResponse =
+        Cf.get(url, referer)
+
+    private suspend fun doc(url: String, referer: String? = null): Document =
+        fetch(url, referer).document
+
+    /* ------------------------- parsing de cards ------------------------- */
+
+    private fun Element.card(): SearchResponse? {
+        val a = selectFirst("a[href]") ?: return null
+        val href = a.attr("href").let { fixUrl(it) }
+        if (!href.contains("/filme/") && !href.contains("/serie/") && !href.contains("/episodio/")) return null
 
         val img = selectFirst("img")
-        val title = img?.attr("alt")?.trim()
-            ?: selectFirst(".pm-video-title, h3, h4, .title")?.text()?.trim()
-            ?: return null
+        val title = (selectFirst("h1.Title, h2.Title, .Title")?.text()
+            ?: img?.attr("alt")
+            ?: a.attr("title"))?.trim()?.takeIf { it.isNotBlank() } ?: return null
 
-        val poster = img?.let { it.attr("data-echo").ifBlank { it.attr("data-src").ifBlank { it.attr("src") } } }
-        val isSeries = title.contains("temporada", true) || href.contains("serie", true)
-        val type = if (isSeries) TvType.TvSeries else TvType.Movie
+        val poster = img?.let {
+            it.attr("data-src").ifBlank { it.attr("data-echo").ifBlank { it.attr("src") } }
+        }?.takeIf { it.isNotBlank() }
 
-        return newMovieSearchResponse(title, fixUrl(href), type) {
+        val type = when {
+            href.contains("/episodio/") || href.contains("/serie/") -> TvType.TvSeries
+            title.contains("temporada", true) -> TvType.TvSeries
+            else -> TvType.Movie
+        }
+
+        return newMovieSearchResponse(title, href, type) {
             this.posterUrl = poster
-            this.year = Regex("""(\d{4})""").find(title)?.groupValues?.get(1)?.toIntOrNull()
+            this.year = Regex("""\(?(\d{4})\)?""").find(title)?.groupValues?.get(1)?.toIntOrNull()
         }
     }
+
+    private fun Document.cards(): List<SearchResponse> =
+        select("article.TPost, div.TPost, li.TPost, div.MovieListSldCn article, .TPostBg + article")
+            .distinctBy { it.selectFirst("a[href]")?.attr("href") }
+            .mapNotNull { it.card() }
+            .distinctBy { it.url }
 
     /* ------------------------- catálogo ------------------------- */
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val base = requireDomain() ?: return newHomePageResponse(request, emptyList())
-        val url = if (page == 1) request.data else request.data.replace("-1-", "-$page-")
-        val doc = Cf.get(url, referer = "$base/").document
-        val items = doc.select("li.pm-video-item, div.pm-video-thumb, div.video-thumb, li[class*='pm-li-video']")
-            .mapNotNull { it.toSearchResult() }
-        return newHomePageResponse(request, items)
+        val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
+        val items = runCatching { doc(url, "$base/").cards() }.getOrElse {
+            runCatching { doc(request.data, "$base/").cards() }.getOrDefault(emptyList())
+        }
+        return newHomePageResponse(request, items, hasNext = items.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (maybeSaveDomain(query)) return emptyList()
         val base = requireDomain() ?: return emptyList()
-        val searchUrl = "$base/search.php?keywords=${URLEncoder.encode(query, "UTF-8")}&video-id="
-        val doc = Cf.get(searchUrl, referer = "$base/").document
-        return doc.select("li.pm-video-item, div.pm-video-thumb, div.video-thumb, li[class*='pm-li-video']")
-            .mapNotNull { it.toSearchResult() }
+        val url = "$base/?s=${URLEncoder.encode(query, "UTF-8")}"
+        return runCatching { doc(url, "$base/").cards() }.getOrDefault(emptyList())
     }
+
+    /* ------------------------- detalhes ------------------------- */
 
     override suspend fun load(url: String): LoadResponse? {
         val base = requireDomain() ?: return null
         val pageUrl = fixUrl(url)
-        val doc = Cf.get(pageUrl, referer = "$base/").document
+        val d = runCatching { doc(pageUrl, "$base/") }.getOrNull() ?: return null
 
-        val title = doc.selectFirst("h1, .pm-video-heading h1")?.text()?.trim()
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
+        val title = d.selectFirst("h1.Title, h1")?.text()?.trim()
+            ?: d.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
             ?: return null
 
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst("#video-wrapper img, .pm-video-thumb img")?.attr("src")
+        val poster = d.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: d.selectFirst("article img[src], .Image img[src]")?.attr("src")
+        val plot = d.selectFirst(".Description p, .Description")?.text()?.trim()
+        val year = Regex("""\(?(\d{4})\)?""").find(title)?.groupValues?.get(1)?.toIntOrNull()
+        val tags = d.select("a[href*='/genero/']").map { it.text().trim() }.filter { it.isNotBlank() }
 
-        val plot = doc.selectFirst("#pm-details, .pm-video-description, #info")?.text()?.trim()
-        val year = Regex("""\d{4}""").find(title)?.value?.toIntOrNull()
+        val epAnchors = d.select("a[href*='/episodio/']").distinctBy { it.attr("href") }
+        val isSeries = pageUrl.contains("/serie/") || epAnchors.isNotEmpty()
 
-        // Check if page contains multiple episode links (Series) or is a single Movie
-        val epLinks = doc.select("a[href*='_'][href$='.html']").filter { el ->
-            val text = el.text()
-            text.contains("Episódio", true) || text.contains("Ep.", true) || text.contains("Temp", true)
-        }
-
-        if (epLinks.isNotEmpty()) {
-            val episodes = epLinks.mapIndexed { idx, el ->
-                val epTitle = el.text().trim()
-                val epNum = Regex("""(?i)(?:epis[oó]dio|ep\.?)\s*(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull() ?: (idx + 1)
-                newEpisode(fixUrl(el.attr("href"))) {
-                    this.name = epTitle
-                    this.episode = epNum
+        if (isSeries) {
+            val episodes = epAnchors.mapNotNull { el ->
+                val href = fixUrl(el.attr("href"))
+                val epTitle = el.text().trim().ifBlank { el.attr("title").trim() }
+                val season = Regex("""temporada[-\s]?(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(href)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+                val number = Regex("""episodio[-\s]?(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(href)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: Regex("""(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: return@mapNotNull null
+                newEpisode(href) {
+                    this.name = epTitle.ifBlank { "T${season}E$number" }
+                    this.season = season
+                    this.episode = number
+                    this.posterUrl = poster
                 }
-            }
+            }.sortedWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
+
+            if (episodes.isEmpty()) return null
+
             return newTvSeriesLoadResponse(title, pageUrl, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.year = year
+                this.tags = tags
             }
         }
 
-        // Movie
         return newMovieLoadResponse(title, pageUrl, TvType.Movie, pageUrl) {
             this.posterUrl = poster
             this.plot = plot
             this.year = year
+            this.tags = tags
         }
     }
 
-    /* ------------------------- players & extraction ------------------------- */
+    /* ------------------------- players ------------------------- */
 
     override suspend fun loadLinks(
         data: String,
@@ -176,151 +223,257 @@ class RedeCanais : MainAPI() {
     ): Boolean {
         val base = requireDomain() ?: return false
         val pageUrl = fixUrl(data)
-        val doc = Cf.get(pageUrl, referer = "$base/").document
+        val d = runCatching { doc(pageUrl, "$base/") }.getOrNull() ?: return false
 
         var found = false
-        val candidateIframeUrls = mutableSetOf<String>()
 
-        // 1. Locate player iframe from #video-wrapper
-        val iframeElements = doc.select(
-            "#video-wrapper iframe, iframe[name='Player'], iframe[src*='player3'], iframe[src*='server.php']"
-        )
+        val tabs = d.select("li[data-tplayernv]").ifEmpty { null }?.map { tab ->
+            val id = tab.attr("data-tplayernv")
+            val label = tab.select("span").map { it.text().trim() }
+                .filter { it.isNotBlank() && !it.equals("ASSISTIR", true) }
+                .joinToString(" ")
+                .ifBlank { "Player" }
+            id to label
+        }
 
-        iframeElements.forEach { el ->
+        val containers: List<Pair<Element?, String>> = if (tabs != null) {
+            tabs.map { (id, label) -> d.selectFirst(".TPlayerTb#$id") to label }
+        } else {
+            d.select(".TPlayerTb").map { it to "Player" }
+        }
+
+        val embeds = LinkedHashMap<String, String>()
+
+        for ((container, label) in containers) {
+            if (container == null) continue
+            container.select("div[data-src], iframe[src], video[src], source[src]").forEach { el ->
+                val raw = el.attr("data-src").ifBlank { el.attr("src") }.trim()
+                if (raw.isNotBlank() && !raw.startsWith("data:")) embeds[fixUrl(raw)] = label
+            }
+        }
+        
+        d.select("a[href*='trembed'], button[data-src*='trembed'], li[data-src*='trembed']").forEach { el ->
+            val raw = el.attr("href").ifBlank { el.attr("data-src") }.trim()
+            if (raw.isNotBlank()) embeds[fixUrl(raw)] = el.text().trim().ifBlank { "Servidor" }
+        }
+
+        for ((embedUrl, label) in embeds) {
+            val resolved = resolvePlayer(embedUrl, pageUrl, label, base, subtitleCallback, callback)
+            if (resolved) found = true
+        }
+
+        return found
+    }
+
+    private suspend fun resolvePlayer(
+        embedUrl: String,
+        pageUrl: String,
+        label: String,
+        base: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val res = runCatching { fetch(embedUrl, pageUrl) }.getOrNull() ?: return false
+        val html = res.text
+        var found = false
+
+        // 1) URLs diretas (proxy _RC_, mp4, m3u8, dash)
+        streamRegexes(html).forEach { url ->
+            if (emit(url, label, embedUrl, base, callback)) found = true
+        }
+
+        // 2) <video>/<source>
+        res.document.select("video[src], video source[src], source[src]").forEach { el ->
             val src = el.attr("src").trim()
-            if (src.isNotBlank()) {
-                val fullUrl = fixUrl(src)
-                candidateIframeUrls.add(fullUrl)
-                // RedeCanais player variant that serves the actual HTML5 video element
-                if (fullUrl.contains("server.php")) {
-                    candidateIframeUrls.add(fullUrl.replace("server.php", "serverplayerfree.php"))
-                    candidateIframeUrls.add(fullUrl.replace("server.php", "serverfplayerfree.php"))
-                } else if (fullUrl.contains(".php")) {
-                    candidateIframeUrls.add(fullUrl.replace(".php", "playerfree.php"))
-                }
-            }
+            if (src.isNotBlank() && emit(src, label, embedUrl, base, callback)) found = true
         }
 
-        // Also collect alternative server buttons if present
-        doc.select("a[href*='server.php'], a[href*='player3'], button[data-src*='server.php']").forEach { el ->
-            val href = el.attr("href").ifBlank { el.attr("data-src") }
-            if (href.isNotBlank()) {
-                val fullUrl = fixUrl(href)
-                candidateIframeUrls.add(fullUrl)
-                if (fullUrl.contains("server.php")) {
-                    candidateIframeUrls.add(fullUrl.replace("server.php", "serverplayerfree.php"))
-                }
-            }
+        // 3) player Drive: /player/film.php?id=<id ofuscado>
+        val playerUrls = Regex("""(?:src|data-src)=["']([^"']*/player/[^"']*\.php\?[^"']+)["']""", RegexOption.IGNORE_CASE)
+            .findAll(html).map { fixUrl(it.groupValues[1]) }.distinct().toList()
+
+        for (playerUrl in playerUrls) {
+            if (resolveDrivePlayer(playerUrl, label, base, callback)) found = true
         }
 
-        // 2. Query each candidate player URL
-        for (playerUrl in candidateIframeUrls) {
-            val res = runCatching { Cf.get(playerUrl, referer = pageUrl) }.getOrNull() ?: continue
-            val html = res.text
-            val playerDoc = res.document
-
-            // Check <video> and <source> tags
-            val tagSources = playerDoc.select("video source[src], #instructions source[src], video[src], source[src]")
-                .mapNotNull { it.attr("src").takeIf { s -> s.isNotBlank() } }
-
-            for (src in tagSources) {
-                if (emitStreamLink(src, base, playerUrl, callback)) {
-                    found = true
-                }
-            }
-
-            // Check for _RC_/proxy links in the player HTML
-            val proxyMatches = Regex("""(?:href|src)=["']([^"']*_RC_/proxy\?src=[^"']+)["']""", RegexOption.IGNORE_CASE)
-                .findAll(html)
-                .map { it.groupValues[1] }
-                .toList()
-
-            for (proxyUrl in proxyMatches) {
-                if (emitStreamLink(proxyUrl, base, playerUrl, callback)) {
-                    found = true
-                }
-            }
-
-            // Check for direct mp4/m3u8 URLs in inline JS scripts
-            val directMatches = Regex("""["'](https?://[^"'\s<>]+\.(?:mp4|m3u8)[^"'\s<>]*)["']""", RegexOption.IGNORE_CASE)
-                .findAll(html)
-                .map { it.groupValues[1] }
-                .filterNot { it.contains("logo") || it.contains("banner") }
-                .toList()
-
-            for (stream in directMatches) {
-                if (emitStreamLink(stream, base, playerUrl, callback)) {
-                    found = true
-                }
-            }
-
-            // Check for nested iframes
-            playerDoc.select("iframe[src]").forEach { innerIframe ->
-                val innerSrc = fixUrl(innerIframe.attr("src"))
-                if (innerSrc != playerUrl && !innerSrc.contains("facebook") && !innerSrc.contains("twitter")) {
-                    loadExtractor(innerSrc, playerUrl, subtitleCallback, callback)
-                }
+        // 4) iframes aninhados
+        res.document.select("iframe[src]").forEach { iframe ->
+            val src = fixUrl(iframe.attr("src"))
+            if (src.isNotBlank() && src != embedUrl && !isJunk(src)) {
+                runCatching { loadExtractor(src, embedUrl, subtitleCallback, callback) }
+                    .onSuccess { if (it) found = true }
             }
         }
 
         return found
     }
 
-    private fun emitStreamLink(
-        rawUrl: String,
+    private suspend fun resolveDrivePlayer(
+        playerUrl: String,
+        label: String,
         base: String,
-        referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (rawUrl.isBlank()) return false
-        val cleanUrl = fixUrl(rawUrl.replace("&amp;", "&"))
+        val html = runCatching { fetch(playerUrl, base).text }.getOrNull() ?: return false
+        var found = false
 
-        val isM3u8 = cleanUrl.contains(".m3u8", ignoreCase = true)
-        val isVideo = cleanUrl.contains(".mp4", ignoreCase = true) || cleanUrl.contains("_RC_/proxy", ignoreCase = true)
+        streamRegexes(html).forEach { if (emit(it, label, playerUrl, base, callback)) found = true }
 
-        if (!isM3u8 && !isVideo) return false
+        val encoded = Regex("""id=["']([0-9a-z]{20,})["']""", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1)
+            ?: Regex("""[?&]id=([0-9a-z]{20,})""", RegexOption.IGNORE_CASE)
+                .find(playerUrl)?.groupValues?.get(1)
 
-        // Emit the proxy stream with the exact RedeCanais headers
+        val driveId = encoded?.let { decodeFileId(it) }
+        if (driveId != null) {
+            val driveUrl = "https://drive.google.com/file/d/$driveId/view"
+            runCatching { loadExtractor(driveUrl, playerUrl, {}, callback) }
+                .onSuccess { if (it) found = true }
+
+            if (!found) {
+                callback.invoke(
+                    ExtractorLink(
+                        source = name,
+                        name = "$name · ${label.trim()}",
+                        url = "https://drive.google.com/file/d/$driveId/preview",
+                        referer = playerUrl,
+                        quality = Qualities.P1080.value,
+                        type = ExtractorLinkType.VIDEO,
+                        headers = streamHeaders(base, playerUrl)
+                    )
+                )
+                found = true
+            }
+        }
+        return found
+    }
+
+    /* ------------------------- decode do id do player ------------------------- */
+
+    private fun decodeFileId(encoded: String): String? {
+        val clean = encoded.trim().lowercase().filter { it.isLetterOrDigit() }
+        if (clean.length < 20) return null
+        val chunks = clean.chunked(2).filter { it.length == 2 }
+
+        // A) big integer em base 36² (1296) -> bytes ASCII
+        runCatching {
+            val n = chunks.fold(BigInteger.ZERO) { acc, p ->
+                acc.multiply(BigInteger.valueOf(1296L)).add(BigInteger.valueOf(p.toInt(36).toLong()))
+            }
+            String(n.toByteArray(), Charsets.ISO_8859_1)
+        }.getOrNull()?.let { if (looksLikeFileId(it)) return it }
+
+        // B) pares base36 com keystream de paridade
+        runCatching {
+            buildString {
+                chunks.forEachIndexed { i, p ->
+                    val parity = if (PARITY_KEY[i % PARITY_KEY.length].code % 2 != 0) 1 else 0
+                    append((p.toInt(36) - parity).toChar())
+                }
+            }
+        }.getOrNull()?.let { if (looksLikeFileId(it)) return it }
+
+        // C) hex direto
+        runCatching {
+            clean.chunked(2).map { it.toInt(16).toChar() }.joinToString("")
+        }.getOrNull()?.let { if (looksLikeFileId(it)) return it }
+
+        return null
+    }
+
+    private fun looksLikeFileId(s: String): Boolean =
+        s.length in 20..60 &&
+            Regex("""^[A-Za-z0-9_-]+$""").matches(s) &&
+            s.any { it.isDigit() } && s.any { it.isLetter() }
+
+    /* ------------------------- emissão de links ------------------------- */
+
+    private fun streamHeaders(base: String, referer: String) = mapOf(
+        "User-Agent" to Cfg.userAgent,
+        "Referer" to referer,
+        "Origin" to base.trimEnd('/')
+    )
+
+    private fun streamRegexes(html: String): List<String> = buildList {
+        Regex("""["'(]([^"'()\s]*_RC_/proxy\?src=[^"'()\s]+)""", RegexOption.IGNORE_CASE)
+            .findAll(html).forEach { add(it.groupValues[1]) }
+        Regex("""["'](https?://[^"'\s<>]+\.(?:mp4|m3u8|mpd)[^"'\s<>]*)""", RegexOption.IGNORE_CASE)
+            .findAll(html).forEach { add(it.groupValues[1]) }
+    }.map { it.replace("&amp;", "&") }
+        .filterNot { it.contains("logo") || it.contains("banner") || it.contains("thumb") }
+        .distinct()
+
+    private fun isJunk(url: String): Boolean =
+        url.contains("facebook") || url.contains("twitter") ||
+            url.contains("whatsapp") || url.contains("doubleclick") || url.contains("googleads")
+
+    private fun emit(
+        raw: String,
+        label: String,
+        referer: String,
+        base: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        if (raw.isBlank()) return false
+        val url = fixUrl(raw.replace("&amp;", "&"))
+        val lower = url.lowercase()
+
+        val isProxy = lower.contains("_rc_/proxy")
+        val isM3u8 = lower.contains(".m3u8")
+        val isDash = lower.contains(".mpd")
+        val isMp4 = lower.contains(".mp4")
+        if (!isProxy && !isM3u8 && !isDash && !isMp4) return false
+
+        val type = when {
+            isM3u8 -> ExtractorLinkType.M3U8
+            isDash -> ExtractorLinkType.DASH
+            else -> ExtractorLinkType.VIDEO
+        }
+        val quality = when {
+            lower.contains("2160") || lower.contains("4k") -> Qualities.P2160.value
+            lower.contains("1080") -> Qualities.P1080.value
+            lower.contains("720") -> Qualities.P720.value
+            lower.contains("480") -> Qualities.P480.value
+            lower.contains("360") -> Qualities.P360.value
+            else -> Qualities.P1080.value
+        }
+
         callback.invoke(
             ExtractorLink(
-                source = this.name,
-                name = "RedeCanais",
-                url = cleanUrl,
-                referer = "$base/",
-                quality = Qualities.P1080.value,
-                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                headers = mapOf(
-                    "User-Agent" to Cfg.userAgent,
-                    "Referer" to "$base/",
-                    "Origin" to base
-                )
+                source = name,
+                name = "$name · ${label.trim()}",
+                url = url,
+                referer = referer,
+                quality = quality,
+                type = type,
+                headers = streamHeaders(base, referer)
             )
         )
 
-        // Also decode the URL inside _RC_/proxy?src= to offer the direct CDN server link
-        if (cleanUrl.contains("_RC_/proxy?src=")) {
+        if (isProxy) {
             runCatching {
-                val encodedTarget = cleanUrl.substringAfter("_RC_/proxy?src=").substringBefore("&")
-                val decodedTarget = URLDecoder.decode(encodedTarget, "UTF-8")
-                if (decodedTarget.startsWith("http")) {
+                val target = URLDecoder.decode(
+                    url.substringAfter("src=").substringBefore("&"), "UTF-8"
+                )
+                if (target.startsWith("http")) {
                     callback.invoke(
                         ExtractorLink(
-                            source = this.name,
-                            name = "RedeCanais (Direto)",
-                            url = decodedTarget,
-                            referer = "$base/",
-                            quality = Qualities.P1080.value,
-                            type = if (decodedTarget.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                            headers = mapOf(
-                                "User-Agent" to Cfg.userAgent,
-                                "Referer" to "$base/"
-                            )
+                            source = name,
+                            name = "$name · Direto",
+                            url = target,
+                            referer = referer,
+                            quality = quality,
+                            type = if (target.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                            headers = streamHeaders(base, referer)
                         )
                     )
                 }
             }
         }
-
         return true
+    }
+
+    companion object {
+        private const val PARITY_KEY = "ea26428b431e926"
     }
 }
