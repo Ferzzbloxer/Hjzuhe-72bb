@@ -6,6 +6,7 @@ import android.widget.Toast
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 class RedeCanais : MainAPI() {
@@ -178,74 +179,148 @@ class RedeCanais : MainAPI() {
         val doc = Cf.get(pageUrl, referer = "$base/").document
 
         var found = false
+        val candidateIframeUrls = mutableSetOf<String>()
 
-        // 1. Locate player iframe in page
-        val iframes = doc.select("#video-wrapper iframe, iframe[name='player_iframe'], iframe[src*='player'], iframe[src*='server'], iframe[src]")
-            .mapNotNull { it.attr("src").takeIf { src -> src.isNotBlank() } }
-            .filterNot { it.contains("facebook") || it.contains("twitter") || it.contains("disqus") }
+        // 1. Locate player iframe from #video-wrapper
+        val iframeElements = doc.select(
+            "#video-wrapper iframe, iframe[name='Player'], iframe[src*='player3'], iframe[src*='server.php']"
+        )
 
-        iframes.forEach { rawIframe ->
-            val iframeUrl = fixUrl(rawIframe)
-
-            // Direct video link inside iframe URL
-            if (iframeUrl.contains(".mp4") || iframeUrl.contains(".m3u8")) {
-                emitLink(iframeUrl, pageUrl, callback)
-                found = true
-                return@forEach
-            }
-
-            // Fetch iframe page to extract actual video stream
-            val playerDoc = runCatching { Cf.get(iframeUrl, referer = pageUrl) }.getOrNull()
-            if (playerDoc != null) {
-                val html = playerDoc.text
-
-                // Try <video> and <source> tags
-                val videoSources = playerDoc.document.select("video source[src], #instructions source[src], video[src], source[src]")
-                    .mapNotNull { it.attr("src").takeIf { s -> s.isNotBlank() } }
-
-                videoSources.forEach { vSrc ->
-                    val streamUrl = fixUrl(vSrc)
-                    emitLink(streamUrl, iframeUrl, callback)
-                    found = true
-                }
-
-                // Regex search for direct streams inside scripts (mp4/m3u8)
-                val scriptMatches = Regex("""(?:file|src)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
-                    .findAll(html)
-                    .map { it.groupValues[1] }
-                    .toList()
-
-                scriptMatches.forEach { sUrl ->
-                    emitLink(fixUrl(sUrl), iframeUrl, callback)
-                    found = true
-                }
-
-                // Nested iframe within player page
-                val nestedIframe = playerDoc.document.selectFirst("iframe[src]")?.attr("src")
-                if (!nestedIframe.isNullOrBlank()) {
-                    loadExtractor(fixUrl(nestedIframe), iframeUrl, subtitleCallback, callback)
-                    found = true
+        iframeElements.forEach { el ->
+            val src = el.attr("src").trim()
+            if (src.isNotBlank()) {
+                val fullUrl = fixUrl(src)
+                candidateIframeUrls.add(fullUrl)
+                // RedeCanais player variant that serves the actual HTML5 video element
+                if (fullUrl.contains("server.php")) {
+                    candidateIframeUrls.add(fullUrl.replace("server.php", "serverplayerfree.php"))
+                    candidateIframeUrls.add(fullUrl.replace("server.php", "serverfplayerfree.php"))
+                } else if (fullUrl.contains(".php")) {
+                    candidateIframeUrls.add(fullUrl.replace(".php", "playerfree.php"))
                 }
             }
+        }
 
-            // Fallback to standard CloudStream extractors
-            loadExtractor(iframeUrl, pageUrl, subtitleCallback, callback)
+        // Also collect alternative server buttons if present
+        doc.select("a[href*='server.php'], a[href*='player3'], button[data-src*='server.php']").forEach { el ->
+            val href = el.attr("href").ifBlank { el.attr("data-src") }
+            if (href.isNotBlank()) {
+                val fullUrl = fixUrl(href)
+                candidateIframeUrls.add(fullUrl)
+                if (fullUrl.contains("server.php")) {
+                    candidateIframeUrls.add(fullUrl.replace("server.php", "serverplayerfree.php"))
+                }
+            }
+        }
+
+        // 2. Query each candidate player URL
+        for (playerUrl in candidateIframeUrls) {
+            val res = runCatching { Cf.get(playerUrl, referer = pageUrl) }.getOrNull() ?: continue
+            val html = res.text
+            val playerDoc = res.document
+
+            // Check <video> and <source> tags
+            val tagSources = playerDoc.select("video source[src], #instructions source[src], video[src], source[src]")
+                .mapNotNull { it.attr("src").takeIf { s -> s.isNotBlank() } }
+
+            for (src in tagSources) {
+                if (emitStreamLink(src, base, playerUrl, callback)) {
+                    found = true
+                }
+            }
+
+            // Check for _RC_/proxy links in the player HTML
+            val proxyMatches = Regex("""(?:href|src)=["']([^"']*_RC_/proxy\?src=[^"']+)["']""", RegexOption.IGNORE_CASE)
+                .findAll(html)
+                .map { it.groupValues[1] }
+                .toList()
+
+            for (proxyUrl in proxyMatches) {
+                if (emitStreamLink(proxyUrl, base, playerUrl, callback)) {
+                    found = true
+                }
+            }
+
+            // Check for direct mp4/m3u8 URLs in inline JS scripts
+            val directMatches = Regex("""["'](https?://[^"'\s<>]+\.(?:mp4|m3u8)[^"'\s<>]*)["']""", RegexOption.IGNORE_CASE)
+                .findAll(html)
+                .map { it.groupValues[1] }
+                .filterNot { it.contains("logo") || it.contains("banner") }
+                .toList()
+
+            for (stream in directMatches) {
+                if (emitStreamLink(stream, base, playerUrl, callback)) {
+                    found = true
+                }
+            }
+
+            // Check for nested iframes
+            playerDoc.select("iframe[src]").forEach { innerIframe ->
+                val innerSrc = fixUrl(innerIframe.attr("src"))
+                if (innerSrc != playerUrl && !innerSrc.contains("facebook") && !innerSrc.contains("twitter")) {
+                    loadExtractor(innerSrc, playerUrl, subtitleCallback, callback)
+                }
+            }
         }
 
         return found
     }
 
-    private fun emitLink(streamUrl: String, referer: String, callback: (ExtractorLink) -> Unit) {
-        val isM3u8 = streamUrl.contains(".m3u8", true)
+    private fun emitStreamLink(
+        rawUrl: String,
+        base: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        if (rawUrl.isBlank()) return false
+        val cleanUrl = fixUrl(rawUrl.replace("&amp;", "&"))
+
+        val isM3u8 = cleanUrl.contains(".m3u8", ignoreCase = true)
+        val isVideo = cleanUrl.contains(".mp4", ignoreCase = true) || cleanUrl.contains("_RC_/proxy", ignoreCase = true)
+
+        if (!isM3u8 && !isVideo) return false
+
+        // Emit the proxy stream with the exact RedeCanais headers
         callback.invoke(
             ExtractorLink(
                 source = this.name,
                 name = "RedeCanais",
-                url = streamUrl,
-                referer = referer,
+                url = cleanUrl,
+                referer = "$base/",
                 quality = Qualities.P1080.value,
-                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                headers = mapOf(
+                    "User-Agent" to Cfg.userAgent,
+                    "Referer" to "$base/",
+                    "Origin" to base
+                )
             )
         )
+
+        // Also decode the URL inside _RC_/proxy?src= to offer the direct CDN server link
+        if (cleanUrl.contains("_RC_/proxy?src=")) {
+            runCatching {
+                val encodedTarget = cleanUrl.substringAfter("_RC_/proxy?src=").substringBefore("&")
+                val decodedTarget = URLDecoder.decode(encodedTarget, "UTF-8")
+                if (decodedTarget.startsWith("http")) {
+                    callback.invoke(
+                        ExtractorLink(
+                            source = this.name,
+                            name = "RedeCanais (Direto)",
+                            url = decodedTarget,
+                            referer = "$base/",
+                            quality = Qualities.P1080.value,
+                            type = if (decodedTarget.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                            headers = mapOf(
+                                "User-Agent" to Cfg.userAgent,
+                                "Referer" to "$base/"
+                            )
+                        )
+                    )
+                }
+            }
+        }
+
+        return true
     }
 }
