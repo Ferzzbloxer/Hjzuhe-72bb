@@ -38,6 +38,8 @@ class RedeCanais : MainAPI() {
             )
         }
 
+    /* ------------------------- configuração ------------------------- */
+
     private fun toast(msg: String) {
         val ctx = Cfg.ctx ?: return
         Handler(Looper.getMainLooper()).post {
@@ -79,6 +81,8 @@ class RedeCanais : MainAPI() {
         }
     }
 
+    /* ------------------------- parsing ------------------------- */
+
     private fun Element.toSearchResult(): SearchResponse? {
         val href = selectFirst("a[href]")?.attr("href") ?: return null
         if (!href.contains("/filme/") && !href.contains("/serie/")) return null
@@ -90,6 +94,8 @@ class RedeCanais : MainAPI() {
             year = Regex("""(\d{4})""").find(text())?.groupValues?.get(1)?.toIntOrNull()
         }
     }
+
+    /* ------------------------- catálogo ------------------------- */
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val base = requireDomain() ?: return newHomePageResponse(request, emptyList())
@@ -233,48 +239,6 @@ class RedeCanais : MainAPI() {
         }
 
         return foundLinks
-    }
-
-    private suspend fun getEmbedUrl(post: String, nume: String, type: String, base: String): String? {
-        val raw = runCatching {
-            Cf.post(
-                "$base/wp-admin/admin-ajax.php",
-                data = mapOf("action" to "doo_player_ajax", "post" to post, "nume" to nume, "type" to type),
-                referer = "$base/"
-            ).text
-        }.getOrNull().orEmpty()
-
-        parseEmbed(raw)?.let { return it }
-
-        val rest = runCatching {
-            Cf.post(
-                "$base/wp-json/dooplayer/v1/player",
-                data = mapOf("id" to post, "nume" to nume, "type" to type),
-                referer = "$base/"
-            ).text
-        }.getOrNull().orEmpty()
-
-        return parseEmbed(rest)
-    }
-
-    private fun parseEmbed(raw: String): String? {
-        if (raw.isBlank()) return null
-        val json = raw.replace("\\/", "/")
-        val url = runCatching { JSONObject(json).optString("embed_url") }.getOrNull()
-            ?.takeIf { it.startsWith("http") }
-            ?: Regex("""embed_url"\s*:\s*"([^"]+)"""").find(json)
-                ?.groupValues?.get(1)?.replace("\\/", "/")
-        return url?.takeIf { it.startsWith("http") }
-    }
-
-    private suspend fun unwrapEmbed(embedUrl: String, referer: String): String? {
-        if (Regex("""\.(m3u8|mp4)(\?|$)""").containsMatchIn(embedUrl)) return embedUrl
-        val html = runCatching { Cf.get(embedUrl, referer = referer).text }.getOrNull() ?: return embedUrl
-        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-            .find(html)?.groupValues?.get(1)
-        val source = Regex("""(?:file|src)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""")
-            .find(html)?.groupValues?.get(1)
-        return (source ?: iframe)?.let { fixUrl(it) } ?: embedUrl
     }
 
     private suspend fun getEmbedUrl(post: String, nume: String, type: String, base: String): String? {
