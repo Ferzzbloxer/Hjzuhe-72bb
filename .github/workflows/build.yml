@@ -1,39 +1,70 @@
-name: build
+name: Build
 
 on:
   push:
-    branches: [ main ]
-    paths-ignore: [ '**.md', 'icon.png' ]
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
 
-      - uses: gradle/actions/setup-gradle@v3
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
 
-      - run: chmod +x gradlew
+      - name: Make executable
+        run: chmod +x gradlew
 
-      - name: Build
+      - name: Build plugins
         run: ./gradlew make makePluginsJson --stacktrace
 
-      - uses: actions/upload-artifact@v4
+      - name: Collect build artifacts
+        run: |
+          mkdir -p build/builds
+          find . -name "*.cs3" -exec cp {} build/builds/ \;
+          find build -maxdepth 2 -name "plugins.json" -exec cp {} build/builds/ \;
+          if [ -f repo.json ]; then
+            cp repo.json build/builds/
+          else
+            cat << EOF > build/builds/repo.json
+          {
+            "name": "RedeCanais",
+            "description": "Repositório RedeCanais para CloudStream",
+            "manifestVersion": 1,
+            "pluginLists": [
+              "https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"
+            ]
+          }
+          EOF
+          fi
+          ls -la build/builds/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: builds
+          name: cloudstream-plugins
           path: build/builds/
 
       - name: Publish to builds branch
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: build/builds
           publish_branch: builds
-          publish_dir: ./build/builds
           force_orphan: true
