@@ -14,15 +14,10 @@ import kotlinx.coroutines.withContext
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Resolve o desafio do Cloudflare em um WebView, captura o cookie resultante e o
- * reaproveita nas requisições OkHttp. Só executa quando um desafio é detectado.
- */
 object Cf {
     private const val SOLVE_TIMEOUT_MS = 40_000L
     private const val POLL_MS = 700L
 
-    // Wildcard quebrado em concatenação para não gerar "estrela-barra" dentro da string.
     private const val ACCEPT_HTML =
         "text/html,application/xhtml+xml,application/xml;q=0.9," + "*" + "/" + "*" + ";q=0.8"
 

@@ -26,7 +26,6 @@ class RedeCanais : MainAPI() {
 
     private var warned = false
 
-    // Fix 1: Type must be List<MainPageData>
     override val mainPage: List<MainPageData>
         get() {
             val b = mainUrl.ifBlank { return emptyList() }
@@ -38,8 +37,6 @@ class RedeCanais : MainAPI() {
                 "$b/ano/${Calendar.getInstance().get(Calendar.YEAR)}/" to "Lançamentos"
             )
         }
-
-    /* ------------------------- configuração ------------------------- */
 
     private fun toast(msg: String) {
         val ctx = Cfg.ctx ?: return
@@ -57,7 +54,6 @@ class RedeCanais : MainAPI() {
         return null
     }
 
-    /** A busca aceita uma URL: valida, salva e devolve lista vazia. */
     private suspend fun maybeSaveDomain(query: String): Boolean {
         val candidate = Cfg.normalize(query)
         val looksUrl = query.startsWith("http", true) ||
@@ -83,8 +79,6 @@ class RedeCanais : MainAPI() {
         }
     }
 
-    /* ------------------------- parsing ------------------------- */
-
     private fun Element.toSearchResult(): SearchResponse? {
         val href = selectFirst("a[href]")?.attr("href") ?: return null
         if (!href.contains("/filme/") && !href.contains("/serie/")) return null
@@ -96,8 +90,6 @@ class RedeCanais : MainAPI() {
             year = Regex("""(\d{4})""").find(text())?.groupValues?.get(1)?.toIntOrNull()
         }
     }
-
-    /* ------------------------- catálogo ------------------------- */
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val base = requireDomain() ?: return newHomePageResponse(request, emptyList())
@@ -167,8 +159,6 @@ class RedeCanais : MainAPI() {
         }
     }
 
-    /* ------------------------- players ------------------------- */
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -181,7 +171,6 @@ class RedeCanais : MainAPI() {
             .select("#playeroptions li[data-post]")
         if (options.isEmpty()) return false
 
-        // Fix 2: Use amap and standard non-suspending ExtractorLink mapping
         options.amap { opt ->
             val label = opt.selectFirst("span.title")?.text()?.trim()
                 ?.replace(Regex("""[▶️\s]+"""), " ")?.trim().orEmpty()
@@ -247,7 +236,7 @@ class RedeCanais : MainAPI() {
     private suspend fun unwrapEmbed(embedUrl: String, referer: String): String? {
         if (Regex("""\.(m3u8|mp4)(\?|$)""").containsMatchIn(embedUrl)) return embedUrl
         val html = runCatching { Cf.get(embedUrl, referer = referer).text }.getOrNull() ?: return embedUrl
-        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val iframe = Regex("""<iframe[^>]+src=["']([^"']+)["']""", RegexOption.IGNORECASE)
             .find(html)?.groupValues?.get(1)
         val source = Regex("""(?:file|src)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""")
             .find(html)?.groupValues?.get(1)
