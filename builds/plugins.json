@@ -1,0 +1,45 @@
+[
+    {
+        "iconUrl": "https://raw.githubusercontent.com/SEU_USUARIO/redecanais-cloudstream/master/icon.png",
+        "fileHash": "sha256-78ecc077cea7706d0efe5f659519def904fb7a7638f24680b94486e2d45e859d",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Ferzzbloxer/Hjzuhe-72bb",
+        "fileSize": 26898,
+        "status": 3,
+        "language": "pt",
+        "authors": [
+            "SEU_USUARIO"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime",
+            "OVA"
+        ],
+        "version": -1,
+        "internalName": "RedeCanais",
+        "description": "Filmes, s\u00e9ries, animes e novelas do RedeCanais (dom\u00ednio configur\u00e1vel)",
+        "url": "https://raw.githubusercontent.com/Ferzzbloxer/Hjzuhe-72bb/builds/RedeCanais.cs3",
+        "name": "RedeCanais"
+    },
+    {
+        "iconUrl": "https://raw.githubusercontent.com/SEU_USUARIO/redecanais-cloudstream/master/icon.png",
+        "fileHash": "sha256-eabe9ea8479253a1e669e0cc810b0b84a60aa044f85856048786fa965978a4ec",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Ferzzbloxer/Hjzuhe-72bb",
+        "fileSize": 8998,
+        "status": 3,
+        "language": "pt",
+        "authors": [
+            "SEU_USUARIO"
+        ],
+        "tvTypes": [
+            "Live"
+        ],
+        "version": -1,
+        "internalName": "RedeCanaisTV",
+        "description": "Canais ao vivo do RedeCanais TV",
+        "url": "https://raw.githubusercontent.com/Ferzzbloxer/Hjzuhe-72bb/builds/RedeCanaisTV.cs3",
+        "name": "RedeCanaisTV"
+    }
+]
